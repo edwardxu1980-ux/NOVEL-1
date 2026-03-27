@@ -1,0 +1,27 @@
+# 科幻小说分集视频制作流水线依赖
+
+# LLM 编剧 (剧本拆分)
+anthropic>=0.40.0
+
+# AI 配音
+edge-tts>=6.1.12
+
+# 视频处理
+moviepy>=2.0.0
+ffmpeg-python>=0.2.0
+
+# 字幕生成
+faster-whisper>=1.0.3
+
+# 工具
+tqdm>=4.66.0
+requests>=2.31.0
+
+# 可选: 本地LLM (替代Claude API)
+# ollama>=0.3.0
+
+# 可选: CosyVoice TTS (中文高质量配音)
+# 安装参考: github.com/FunAudioLLM/CosyVoice
+
+# 可选: ComfyUI Python客户端 (图像/视频生成)
+# websocket-client>=1.7.0
