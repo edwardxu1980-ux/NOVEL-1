@@ -1,12 +1,14 @@
 """
 科幻小说分集视频制作流水线
-Novel → Episodes → Scripts → Video
+Novel → Episodes → Scripts → TTS → Video → Subtitles → Final
 
 依赖: anthropic, edge-tts, moviepy, faster-whisper
+可选: SILICONFLOW_API_KEY 环境变量 (用于自动视频生成)
 """
 
 import os
 import json
+import asyncio
 import anthropic
 
 # ─────────────────────────────────────────────
@@ -164,6 +166,68 @@ def export_ffmpeg_commands(episodes: list[dict], output_dir: str = "output"):
 
 
 # ─────────────────────────────────────────────
+# 7. edge-tts 直接配音（异步）
+# ─────────────────────────────────────────────
+
+async def run_tts_for_episode(ep_num: int, narration_file: str, audio_output: str):
+    """使用 edge-tts 直接生成单集配音"""
+    try:
+        import edge_tts
+    except ImportError:
+        raise ImportError("请安装 edge-tts: pip install edge-tts")
+
+    os.makedirs(os.path.dirname(audio_output), exist_ok=True)
+    with open(narration_file, "r", encoding="utf-8") as f:
+        text = f.read().strip()
+
+    communicate = edge_tts.Communicate(text, TTS_VOICE)
+    await communicate.save(audio_output)
+    print(f"[配音] 第{ep_num}集配音已生成: {audio_output}")
+
+
+async def run_tts_all(episodes: list[dict]):
+    """并发生成所有集数配音"""
+    tasks = []
+    for ep in episodes:
+        ep_num = ep["episode"]
+        narration_file = f"output/scripts/ep{ep_num:02d}_narration.txt"
+        audio_output = f"output/tts/ep{ep_num:02d}_voice.mp3"
+        if os.path.exists(audio_output):
+            print(f"[跳过] 第{ep_num}集配音已存在: {audio_output}")
+            continue
+        tasks.append(run_tts_for_episode(ep_num, narration_file, audio_output))
+    if tasks:
+        await asyncio.gather(*tasks)
+
+
+# ─────────────────────────────────────────────
+# 8. 字幕生成（调用 subtitle_generator）
+# ─────────────────────────────────────────────
+
+def generate_subtitles_for_all(episodes: list[dict], model_size: str = "small"):
+    """为所有集数生成字幕"""
+    try:
+        from subtitle_generator import generate_subtitle
+    except ImportError:
+        from workflow.subtitle_generator import generate_subtitle
+
+    os.makedirs("output/subtitles", exist_ok=True)
+    for ep in episodes:
+        ep_num = ep["episode"]
+        audio_path = f"output/tts/ep{ep_num:02d}_voice.mp3"
+        srt_path = f"output/subtitles/ep{ep_num:02d}.srt"
+
+        if not os.path.exists(audio_path):
+            print(f"[跳过] 第{ep_num}集音频不存在，跳过字幕生成")
+            continue
+        if os.path.exists(srt_path):
+            print(f"[跳过] 第{ep_num}集字幕已存在: {srt_path}")
+            continue
+
+        generate_subtitle(audio_path, srt_path, model_size=model_size)
+
+
+# ─────────────────────────────────────────────
 # 主流程
 # ─────────────────────────────────────────────
 
@@ -172,6 +236,13 @@ def main():
     parser = argparse.ArgumentParser(description="科幻小说分集视频制作流水线")
     parser.add_argument("novel_file", help="小说文本文件路径 (.txt)")
     parser.add_argument("--episodes", type=int, default=6, help="拆分集数（默认6集）")
+    parser.add_argument("--tts", action="store_true", help="自动生成配音 (需要 edge-tts)")
+    parser.add_argument("--subtitles", action="store_true", help="自动生成字幕 (需要 faster-whisper)")
+    parser.add_argument("--generate-video", action="store_true",
+                        help="调用 SiliconFlow API 生成视频 (需要 SILICONFLOW_API_KEY)")
+    parser.add_argument("--whisper-model", default="small",
+                        help="Whisper 模型大小 (tiny/base/small/medium/large-v3，默认 small)")
+    parser.add_argument("--dry-run", action="store_true", help="视频生成仅打印，不实际调用 API")
     args = parser.parse_args()
 
     print("=" * 50)
@@ -179,35 +250,72 @@ def main():
     print("=" * 50)
 
     # 步骤 1: 读取小说
-    print(f"\n[1/5] 读取小说: {args.novel_file}")
+    print(f"\n[1/7] 读取小说: {args.novel_file}")
     novel_text = load_novel(args.novel_file)
     print(f"      字数: {len(novel_text)}")
 
     # 步骤 2: 拆分分集
-    print(f"\n[2/5] 用 Claude 拆分为 {args.episodes} 集...")
+    print(f"\n[2/7] 用 Claude 拆分为 {args.episodes} 集...")
     episodes = split_into_episodes(novel_text, args.episodes)
     with open("output/episodes.json", "w", encoding="utf-8") as f:
         json.dump(episodes, f, ensure_ascii=False, indent=2)
     print(f"      已生成 {len(episodes)} 集脚本 → output/episodes.json")
 
     # 步骤 3: 导出旁白脚本
-    print("\n[3/5] 导出旁白脚本...")
+    print("\n[3/7] 导出旁白脚本...")
     export_narration_scripts(episodes)
 
     # 步骤 4: 导出视频提示词
-    print("\n[4/5] 导出视频生成提示词...")
+    print("\n[4/7] 导出视频生成提示词...")
     export_video_prompts(episodes)
 
-    # 步骤 5: 生成配音和合成命令
-    print("\n[5/5] 生成配音和视频合成命令...")
-    export_tts_commands(episodes)
-    export_ffmpeg_commands(episodes)
+    # 步骤 5: 生成配音
+    print("\n[5/7] 生成配音...")
+    if args.tts:
+        asyncio.run(run_tts_all(episodes))
+    else:
+        export_tts_commands(episodes)
+        print("      (使用 --tts 参数可自动生成配音，或手动运行 output/run_tts.sh)")
+
+    # 步骤 6: 生成字幕
+    print("\n[6/7] 生成字幕...")
+    if args.subtitles:
+        generate_subtitles_for_all(episodes, model_size=args.whisper_model)
+    else:
+        print("      (使用 --subtitles 参数可自动生成字幕)")
+
+    # 步骤 7: 视频生成 + FFmpeg 合成命令
+    print("\n[7/7] 视频生成与合成...")
+    if args.generate_video:
+        try:
+            from video_generator import generate_episode_videos
+        except ImportError:
+            from workflow.video_generator import generate_episode_videos
+
+        for ep in episodes:
+            ep_num = ep["episode"]
+            prompts_file = f"output/prompts/ep{ep_num:02d}_prompts.json"
+            output_dir = f"output/video/ep{ep_num:02d}"
+            print(f"  生成第{ep_num}集视频...")
+            generate_episode_videos(
+                prompts_file=prompts_file,
+                output_dir=output_dir,
+                dry_run=args.dry_run,
+            )
+    else:
+        export_ffmpeg_commands(episodes)
+        print("      (使用 --generate-video 参数可通过 SiliconFlow API 自动生成视频)")
 
     print("\n" + "=" * 50)
-    print("准备完成！后续步骤：")
-    print("  1. 运行 output/run_tts.sh 生成配音")
-    print("  2. 将 output/prompts/*.json 提供给 Wan2.2 或 Open-Sora 生成视频")
-    print("  3. 视频生成完成后运行 output/run_ffmpeg.sh 合成最终视频")
+    print("流水线完成！输出目录结构：")
+    print("  output/")
+    print("  ├── episodes.json          # 分集脚本")
+    print("  ├── scripts/ep*_narration.txt  # 旁白文本")
+    print("  ├── prompts/ep*_prompts.json   # 视频提示词")
+    print("  ├── tts/ep*_voice.mp3          # 配音音频")
+    print("  ├── subtitles/ep*.srt          # 字幕文件")
+    print("  ├── video/ep*/                 # 视频片段")
+    print("  └── final/ep*_final.mp4        # 最终成片")
     print("=" * 50)
 
 
