@@ -1,0 +1,46 @@
+# 科幻小说分集视频制作流水线配置文件
+# 环境变量可用 ${VAR_NAME} 语法引用
+
+# ─── LLM 编剧 ───────────────────────────────
+anthropic:
+  api_key: ${ANTHROPIC_API_KEY}      # 必填
+  model: claude-opus-4-6
+
+# ─── 视频生成 ────────────────────────────────
+siliconflow:
+  api_key: ${SILICONFLOW_API_KEY}    # 使用 --generate-video 时必填
+  model: Wan/Wan2.2-T2V-14B
+  image_size: "1280x720"
+  num_frames: 81                      # ~5秒 @16fps
+
+# ─── 配音 TTS ────────────────────────────────
+tts:
+  backend: edge-tts                   # edge-tts | cosyvoice
+  # edge-tts 配置
+  voice: zh-CN-YunxiNeural            # 中文男声，可换 zh-CN-XiaoxiaoNeural(女声)
+  # CosyVoice 配置
+  cosyvoice_model: pretrained_models/CosyVoice2-0.5B
+  cosyvoice_speaker: 中文男性旁白      # 说话人名称
+
+# ─── 字幕生成 ────────────────────────────────
+whisper:
+  model_size: small                   # tiny | base | small | medium | large-v3
+  language: zh
+  device: auto                        # auto | cpu | cuda
+
+# ─── 角色一致性 ──────────────────────────────
+characters:
+  enabled: true                       # 是否启用角色一致性追踪
+  extract_on_split: true              # 分集时同步提取角色信息
+  enrich_prompts: true                # 是否将角色外貌注入视频提示词
+
+# ─── 输出设置 ────────────────────────────────
+output:
+  dir: output
+  episodes: 6                         # 默认拆分集数
+
+# ─── Web UI ──────────────────────────────────
+ui:
+  host: 0.0.0.0
+  port: 7860
+  share: false                        # 设为 true 可生成公网分享链接

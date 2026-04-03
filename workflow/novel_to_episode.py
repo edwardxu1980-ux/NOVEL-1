@@ -2,14 +2,25 @@
 科幻小说分集视频制作流水线
 Novel → Episodes → Scripts → TTS → Video → Subtitles → Final
 
-依赖: anthropic, edge-tts, moviepy, faster-whisper
-可选: SILICONFLOW_API_KEY 环境变量 (用于自动视频生成)
+依赖: anthropic, edge-tts, moviepy, faster-whisper, pyyaml
+可选: SILICONFLOW_API_KEY (视频生成), COSYVOICE_ROOT (高质量配音)
 """
 
 import os
 import json
 import asyncio
 import anthropic
+
+# 加载配置（config.yaml 或环境变量）
+try:
+    from config import get_config as _get_config
+    _cfg = _get_config()
+except Exception:
+    _cfg = None
+
+
+def _cfg_get(*keys, default=None):
+    return _cfg.get(*keys, default=default) if _cfg else default
 
 # ─────────────────────────────────────────────
 # 1. 读取小说文本
@@ -50,11 +61,12 @@ SPLIT_SYSTEM_PROMPT = """你是一名资深科幻影视编剧。
 - 科幻氛围突出，包含宇宙、飞船、外星、未来城市等元素
 """
 
-def split_into_episodes(novel_text: str, num_episodes: int = 6) -> list[dict]:
+def split_into_episodes(novel_text: str, num_episodes: int = 6, model: str = None) -> list[dict]:
     client = anthropic.Anthropic()
 
+    model = model or _cfg_get("anthropic", "model", default="claude-opus-4-6")
     message = client.messages.create(
-        model="claude-opus-4-6",
+        model=model,
         max_tokens=8096,
         system=SPLIT_SYSTEM_PROMPT,
         messages=[
@@ -234,58 +246,116 @@ def generate_subtitles_for_all(episodes: list[dict], model_size: str = "small"):
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="科幻小说分集视频制作流水线")
-    parser.add_argument("novel_file", help="小说文本文件路径 (.txt)")
-    parser.add_argument("--episodes", type=int, default=6, help="拆分集数（默认6集）")
-    parser.add_argument("--tts", action="store_true", help="自动生成配音 (需要 edge-tts)")
+    parser.add_argument("novel_file", nargs="?", help="小说文本文件路径 (.txt)（--ui 模式下可省略）")
+    parser.add_argument("--config", default=None, help="配置文件路径（默认搜索 config.yaml）")
+    parser.add_argument("--episodes", type=int, default=None, help="拆分集数（默认读取 config.yaml）")
+    parser.add_argument("--tts", action="store_true", help="自动生成配音")
+    parser.add_argument("--tts-backend", default=None,
+                        choices=["auto", "cosyvoice", "edge-tts"],
+                        help="TTS 后端（默认读取 config.yaml）")
     parser.add_argument("--subtitles", action="store_true", help="自动生成字幕 (需要 faster-whisper)")
+    parser.add_argument("--characters", action="store_true", help="提取角色信息并注入提示词")
     parser.add_argument("--generate-video", action="store_true",
                         help="调用 SiliconFlow API 生成视频 (需要 SILICONFLOW_API_KEY)")
-    parser.add_argument("--whisper-model", default="small",
-                        help="Whisper 模型大小 (tiny/base/small/medium/large-v3，默认 small)")
+    parser.add_argument("--whisper-model", default=None,
+                        help="Whisper 模型大小 (tiny/base/small/medium/large-v3)")
     parser.add_argument("--dry-run", action="store_true", help="视频生成仅打印，不实际调用 API")
+    parser.add_argument("--ui", action="store_true", help="启动 Web UI")
     args = parser.parse_args()
+
+    # 加载配置
+    try:
+        from config import get_config
+        cfg = get_config(args.config)
+    except Exception:
+        cfg = None
+
+    def cfg_get(*keys, default=None):
+        return cfg.get(*keys, default=default) if cfg else default
+
+    # ── Web UI 模式 ──
+    if args.ui:
+        try:
+            from web_ui import launch
+        except ImportError:
+            from workflow.web_ui import launch
+        launch(config_path=args.config)
+        return
+
+    if not args.novel_file:
+        parser.error("novel_file 是必填参数（或使用 --ui 启动 Web UI）")
+
+    num_episodes = args.episodes or cfg_get("output", "episodes", default=6)
+    whisper_model = args.whisper_model or cfg_get("whisper", "model_size", default="small")
+    tts_backend = args.tts_backend or cfg_get("tts", "backend", default="auto")
 
     print("=" * 50)
     print("科幻小说分集视频制作流水线")
     print("=" * 50)
 
     # 步骤 1: 读取小说
-    print(f"\n[1/7] 读取小说: {args.novel_file}")
+    print(f"\n[1/8] 读取小说: {args.novel_file}")
     novel_text = load_novel(args.novel_file)
     print(f"      字数: {len(novel_text)}")
 
     # 步骤 2: 拆分分集
-    print(f"\n[2/7] 用 Claude 拆分为 {args.episodes} 集...")
-    episodes = split_into_episodes(novel_text, args.episodes)
+    print(f"\n[2/8] 用 Claude 拆分为 {num_episodes} 集...")
+    episodes = split_into_episodes(novel_text, num_episodes)
     with open("output/episodes.json", "w", encoding="utf-8") as f:
         json.dump(episodes, f, ensure_ascii=False, indent=2)
     print(f"      已生成 {len(episodes)} 集脚本 → output/episodes.json")
 
-    # 步骤 3: 导出旁白脚本
-    print("\n[3/7] 导出旁白脚本...")
+    # 步骤 3: 角色提取与外貌注入
+    print("\n[3/8] 角色一致性追踪...")
+    if args.characters or cfg_get("characters", "enabled", default=False):
+        try:
+            from character_tracker import extract_and_save, CharacterRegistry
+            registry = extract_and_save(novel_text, "output/characters.json")
+            if cfg_get("characters", "enrich_prompts", default=True):
+                episodes = registry.enrich_episodes(episodes)
+                print("      已将角色外貌注入场景提示词")
+        except Exception as e:
+            print(f"      角色提取失败（跳过）: {e}")
+    else:
+        print("      (使用 --characters 参数启用角色一致性追踪)")
+
+    # 步骤 4: 导出旁白脚本
+    print("\n[4/8] 导出旁白脚本...")
     export_narration_scripts(episodes)
 
-    # 步骤 4: 导出视频提示词
-    print("\n[4/7] 导出视频生成提示词...")
+    # 步骤 5: 导出视频提示词
+    print("\n[5/8] 导出视频生成提示词...")
     export_video_prompts(episodes)
 
-    # 步骤 5: 生成配音
-    print("\n[5/7] 生成配音...")
+    # 步骤 6: 生成配音
+    print("\n[6/8] 生成配音...")
     if args.tts:
-        asyncio.run(run_tts_all(episodes))
+        try:
+            from cosyvoice_tts import generate_episode_audio
+            generate_episode_audio(
+                episodes,
+                backend=tts_backend,
+                voice=cfg_get("tts", "voice", default="zh-CN-YunxiNeural"),
+                cosyvoice_model=cfg_get("tts", "cosyvoice_model",
+                                        default="pretrained_models/CosyVoice2-0.5B"),
+                cosyvoice_speaker=cfg_get("tts", "cosyvoice_speaker", default="中文男性旁白"),
+            )
+        except Exception as e:
+            print(f"      cosyvoice_tts 调用失败，降级到 edge-tts: {e}")
+            asyncio.run(run_tts_all(episodes))
     else:
         export_tts_commands(episodes)
         print("      (使用 --tts 参数可自动生成配音，或手动运行 output/run_tts.sh)")
 
-    # 步骤 6: 生成字幕
-    print("\n[6/7] 生成字幕...")
+    # 步骤 7: 生成字幕
+    print("\n[7/8] 生成字幕...")
     if args.subtitles:
-        generate_subtitles_for_all(episodes, model_size=args.whisper_model)
+        generate_subtitles_for_all(episodes, model_size=whisper_model)
     else:
         print("      (使用 --subtitles 参数可自动生成字幕)")
 
-    # 步骤 7: 视频生成 + FFmpeg 合成命令
-    print("\n[7/7] 视频生成与合成...")
+    # 步骤 8: 视频生成 + FFmpeg 合成命令
+    print("\n[8/8] 视频生成与合成...")
     if args.generate_video:
         try:
             from video_generator import generate_episode_videos
@@ -309,13 +379,15 @@ def main():
     print("\n" + "=" * 50)
     print("流水线完成！输出目录结构：")
     print("  output/")
-    print("  ├── episodes.json          # 分集脚本")
+    print("  ├── episodes.json              # 分集脚本")
+    print("  ├── characters.json            # 角色信息")
     print("  ├── scripts/ep*_narration.txt  # 旁白文本")
-    print("  ├── prompts/ep*_prompts.json   # 视频提示词")
+    print("  ├── prompts/ep*_prompts.json   # 视频提示词（含角色外貌）")
     print("  ├── tts/ep*_voice.mp3          # 配音音频")
     print("  ├── subtitles/ep*.srt          # 字幕文件")
     print("  ├── video/ep*/                 # 视频片段")
     print("  └── final/ep*_final.mp4        # 最终成片")
+    print("\n提示: 使用 --ui 参数启动 Web 可视化界面")
     print("=" * 50)
 
 
