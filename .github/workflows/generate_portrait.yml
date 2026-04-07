@@ -1,0 +1,98 @@
+name: 生成角色形象图片
+
+on:
+  workflow_dispatch:
+    inputs:
+      character:
+        description: '角色名称'
+        required: true
+        type: choice
+        options:
+          - 叶枫
+          - 路佳
+          - 左胧月
+      variant:
+        description: '变体（all = 全部）'
+        required: true
+        default: '标准半身像'
+        type: choice
+        options:
+          - 标准半身像
+          - 正脸特写
+          - 狙击手姿态
+          - 外交官学院制服站姿
+          - 情感时刻
+          - 班长指挥
+          - 情感破防
+          - 窗边俯视
+          - 印记显现
+          - 觉醒爆发
+          - all
+      model:
+        description: '图片生成模型'
+        required: true
+        default: 'black-forest-labs/FLUX.1-dev'
+        type: choice
+        options:
+          - black-forest-labs/FLUX.1-dev
+          - black-forest-labs/FLUX.1-schnell
+          - Kwai-Kolors/Kolors
+      steps:
+        description: '推理步数（20=快速预览，30=标准，40=高质量）'
+        required: true
+        default: '30'
+      seed:
+        description: '随机种子（留空=随机，填数字=可复现）'
+        required: false
+        default: ''
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          ref: claude/continue-work-uGqSS
+
+      - name: 安装 Python 依赖
+        run: pip install requests
+
+      - name: 生成角色形象图片
+        env:
+          SILICONFLOW_API_KEY: ${{ secrets.SILICONFLOW_API_KEY }}
+        run: |
+          SEED_ARG=""
+          if [ -n "${{ github.event.inputs.seed }}" ]; then
+            SEED_ARG="--seed ${{ github.event.inputs.seed }}"
+          fi
+
+          python3 workflow/generate_character_portrait.py \
+            --character "${{ github.event.inputs.character }}" \
+            --variant "${{ github.event.inputs.variant }}" \
+            --model "${{ github.event.inputs.model }}" \
+            --steps "${{ github.event.inputs.steps }}" \
+            --output-dir "characters/portraits" \
+            $SEED_ARG
+
+      - name: 上传图片为 Artifact（临时下载链接）
+        uses: actions/upload-artifact@v4
+        with:
+          name: portraits-${{ github.event.inputs.character }}-${{ github.event.inputs.variant }}
+          path: characters/portraits/*.png
+          retention-days: 7
+
+      - name: 提交图片到仓库
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add characters/portraits/*.png
+          if git diff --staged --quiet; then
+            echo "没有新图片需要提交（文件已存在且相同）"
+          else
+            git commit -m "自动生成：${{ github.event.inputs.character }} - ${{ github.event.inputs.variant }} 角色形象图"
+            git push origin claude/continue-work-uGqSS
+          fi
