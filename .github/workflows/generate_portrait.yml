@@ -1,18 +1,23 @@
 name: 生成角色形象图片
 
 on:
+  # 方式一：推送触发文件自动触发（环境内可用）
+  push:
+    branches:
+      - claude/continue-work-uGqSS
+    paths:
+      - 'characters/portraits/.trigger'
+
+  # 方式二：GitHub 网页手动触发（备用）
   workflow_dispatch:
     inputs:
       character:
         description: '角色名称'
         required: true
         type: choice
-        options:
-          - 叶枫
-          - 路佳
-          - 左胧月
+        options: [叶枫, 路佳, 左胧月]
       variant:
-        description: '变体（all = 全部）'
+        description: '变体（all=全部）'
         required: true
         default: '标准半身像'
         type: choice
@@ -29,7 +34,7 @@ on:
           - 觉醒爆发
           - all
       model:
-        description: '图片生成模型'
+        description: '模型'
         required: true
         default: 'black-forest-labs/FLUX.1-dev'
         type: choice
@@ -38,15 +43,15 @@ on:
           - black-forest-labs/FLUX.1-schnell
           - Kwai-Kolors/Kolors
       steps:
-        description: '推理步数（20=快速预览 30=标准 40=高质量）'
+        description: '推理步数（20快/30标准/40高质量）'
         required: true
         default: '30'
       seed:
-        description: '随机种子（留空=随机，填数字=可复现相同结果）'
+        description: '随机种子（留空=随机）'
         required: false
         default: ''
       siliconflow_api_key:
-        description: 'SiliconFlow API Key（优先级低于 Repo Secret）'
+        description: 'SiliconFlow API Key'
         required: false
         default: ''
 
@@ -62,33 +67,59 @@ jobs:
         with:
           ref: claude/continue-work-uGqSS
 
-      - name: 安装 Python 依赖
+      - name: 读取触发文件参数（push 触发时）
+        if: github.event_name == 'push'
+        run: |
+          echo "=== 触发文件内容 ==="
+          cat characters/portraits/.trigger
+          CHARACTER=$(python3 -c "import json; d=json.load(open('characters/portraits/.trigger')); print(d['character'])")
+          VARIANT=$(python3 -c "import json; d=json.load(open('characters/portraits/.trigger')); print(d['variant'])")
+          MODEL=$(python3 -c "import json; d=json.load(open('characters/portraits/.trigger')); print(d.get('model','black-forest-labs/FLUX.1-dev'))")
+          STEPS=$(python3 -c "import json; d=json.load(open('characters/portraits/.trigger')); print(d.get('steps',30))")
+          SEED=$(python3 -c "import json; d=json.load(open('characters/portraits/.trigger')); print(d.get('seed',''))")
+          API_KEY=$(python3 -c "import json; d=json.load(open('characters/portraits/.trigger')); print(d.get('siliconflow_api_key',''))")
+          echo "CHARACTER=$CHARACTER" >> $GITHUB_ENV
+          echo "VARIANT=$VARIANT" >> $GITHUB_ENV
+          echo "MODEL=$MODEL" >> $GITHUB_ENV
+          echo "STEPS=$STEPS" >> $GITHUB_ENV
+          echo "SEED=$SEED" >> $GITHUB_ENV
+          echo "TRIGGER_API_KEY=$API_KEY" >> $GITHUB_ENV
+
+      - name: 设置 workflow_dispatch 参数
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          echo "CHARACTER=${{ github.event.inputs.character }}" >> $GITHUB_ENV
+          echo "VARIANT=${{ github.event.inputs.variant }}" >> $GITHUB_ENV
+          echo "MODEL=${{ github.event.inputs.model }}" >> $GITHUB_ENV
+          echo "STEPS=${{ github.event.inputs.steps }}" >> $GITHUB_ENV
+          echo "SEED=${{ github.event.inputs.seed }}" >> $GITHUB_ENV
+          echo "TRIGGER_API_KEY=${{ github.event.inputs.siliconflow_api_key }}" >> $GITHUB_ENV
+
+      - name: 安装依赖
         run: pip install requests
 
-      - name: 生成角色形象图片
-        env:
-          # 优先用 Repo Secret，其次用界面输入的 key
-          SILICONFLOW_API_KEY: ${{ secrets.SILICONFLOW_API_KEY || github.event.inputs.siliconflow_api_key }}
+      - name: 生成图片
         run: |
+          EFFECTIVE_KEY="${{ secrets.SILICONFLOW_API_KEY }}"
+          [ -z "$EFFECTIVE_KEY" ] && EFFECTIVE_KEY="$TRIGGER_API_KEY"
           SEED_ARG=""
-          if [ -n "${{ github.event.inputs.seed }}" ]; then
-            SEED_ARG="--seed ${{ github.event.inputs.seed }}"
-          fi
+          [ -n "$SEED" ] && SEED_ARG="--seed $SEED"
 
           python3 workflow/generate_character_portrait.py \
-            --character "${{ github.event.inputs.character }}" \
-            --variant "${{ github.event.inputs.variant }}" \
-            --model "${{ github.event.inputs.model }}" \
-            --steps "${{ github.event.inputs.steps }}" \
+            --character "$CHARACTER" \
+            --variant "$VARIANT" \
+            --model "$MODEL" \
+            --steps "$STEPS" \
             --output-dir "characters/portraits" \
+            --api-key "$EFFECTIVE_KEY" \
             $SEED_ARG
 
-      - name: 上传图片为 Artifact（7天有效下载链接）
+      - name: 上传 Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: portraits-${{ github.event.inputs.character }}-${{ github.run_number }}
+          name: portraits-${{ env.CHARACTER }}-${{ github.run_number }}
           path: characters/portraits/*.png
-          retention-days: 7
+          retention-days: 14
 
       - name: 提交图片到仓库
         run: |
@@ -96,8 +127,8 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add characters/portraits/*.png
           if git diff --staged --quiet; then
-            echo "没有新图片需要提交"
+            echo "无新图片"
           else
-            git commit -m "自动生成：${{ github.event.inputs.character }} - ${{ github.event.inputs.variant }}"
+            git commit -m "自动生成：$CHARACTER - $VARIANT"
             git push origin claude/continue-work-uGqSS
           fi
