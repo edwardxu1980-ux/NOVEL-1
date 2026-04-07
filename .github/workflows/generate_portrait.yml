@@ -38,11 +38,15 @@ on:
           - black-forest-labs/FLUX.1-schnell
           - Kwai-Kolors/Kolors
       steps:
-        description: '推理步数（20=快速预览，30=标准，40=高质量）'
+        description: '推理步数（20=快速预览 30=标准 40=高质量）'
         required: true
         default: '30'
       seed:
-        description: '随机种子（留空=随机，填数字=可复现）'
+        description: '随机种子（留空=随机，填数字=可复现相同结果）'
+        required: false
+        default: ''
+      siliconflow_api_key:
+        description: 'SiliconFlow API Key（优先级低于 Repo Secret）'
         required: false
         default: ''
 
@@ -63,7 +67,8 @@ jobs:
 
       - name: 生成角色形象图片
         env:
-          SILICONFLOW_API_KEY: ${{ secrets.SILICONFLOW_API_KEY }}
+          # 优先用 Repo Secret，其次用界面输入的 key
+          SILICONFLOW_API_KEY: ${{ secrets.SILICONFLOW_API_KEY || github.event.inputs.siliconflow_api_key }}
         run: |
           SEED_ARG=""
           if [ -n "${{ github.event.inputs.seed }}" ]; then
@@ -78,10 +83,10 @@ jobs:
             --output-dir "characters/portraits" \
             $SEED_ARG
 
-      - name: 上传图片为 Artifact（临时下载链接）
+      - name: 上传图片为 Artifact（7天有效下载链接）
         uses: actions/upload-artifact@v4
         with:
-          name: portraits-${{ github.event.inputs.character }}-${{ github.event.inputs.variant }}
+          name: portraits-${{ github.event.inputs.character }}-${{ github.run_number }}
           path: characters/portraits/*.png
           retention-days: 7
 
@@ -91,8 +96,8 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add characters/portraits/*.png
           if git diff --staged --quiet; then
-            echo "没有新图片需要提交（文件已存在且相同）"
+            echo "没有新图片需要提交"
           else
-            git commit -m "自动生成：${{ github.event.inputs.character }} - ${{ github.event.inputs.variant }} 角色形象图"
+            git commit -m "自动生成：${{ github.event.inputs.character }} - ${{ github.event.inputs.variant }}"
             git push origin claude/continue-work-uGqSS
           fi
